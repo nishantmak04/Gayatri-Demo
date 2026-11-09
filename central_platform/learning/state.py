@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from central_platform.models.schema import LearningEvent, MasteryState
+from central_platform.models.schema import LearningEvent, MasteryState, PedagogicalAction
 from core.config import DATA_DIR
 
 logger = logging.getLogger("gayatri.central_platform.learning")
@@ -100,7 +100,21 @@ class LearningStateManager:
                 logger.info("Event %s already recorded; skipping mastery re-application.", event.id)
                 return
 
-            correctness_val = 1 if event.correctness is True else (0 if event.correctness is False else None)
+            # Only evaluator-classified events may affect mastery. A malformed or
+            # manually-created EXPLAIN event must not gain authority merely because
+            # it carries a correctness flag or misconception string.
+            is_evaluated = (
+                event.action == PedagogicalAction.EVALUATE
+                and event.correctness is not None
+            )
+            is_remediation = (
+                event.action == PedagogicalAction.REMEDIATE
+                and bool(event.misconception)
+            )
+            correctness_val = (
+                1 if event.correctness is True else 0
+            ) if is_evaluated else None
+            misconception_val = event.misconception if is_remediation else None
             topic_val = getattr(event, "topic_id", None) or event.module_id
 
             cursor.execute("""
@@ -109,16 +123,16 @@ class LearningStateManager:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 event.id, event.student_id, event.course_id, event.module_id, topic_val,
-                event.prompt, event.response, event.action.value, event.misconception, correctness_val, event.timestamp
+                event.prompt, event.response, event.action.value, misconception_val, correctness_val, event.timestamp
             ))
 
             # Update mastery state dynamically
             current = self.get_mastery(event.student_id, event.course_id)
             topic_key = topic_val or "Fundamentals"
 
-            if event.misconception:
-                if event.misconception not in current.recent_misconceptions:
-                    current.recent_misconceptions.append(event.misconception)
+            if is_remediation:
+                if misconception_val not in current.recent_misconceptions:
+                    current.recent_misconceptions.append(misconception_val)
                 # Bounded recent history (max 5)
                 current.recent_misconceptions = current.recent_misconceptions[-5:]
                 current.overall_mastery = max(0.1, round(current.overall_mastery - 0.05, 2))
@@ -129,9 +143,9 @@ class LearningStateManager:
                 if topic_key not in current.weak_topics:
                     current.weak_topics.append(topic_key)
 
-                current.recommended_next_action = f"Remediate: {event.misconception}"
+                current.recommended_next_action = f"Remediate: {misconception_val}"
 
-            elif event.correctness is True:
+            elif is_evaluated and event.correctness is True:
                 current.overall_mastery = min(1.0, round(current.overall_mastery + 0.05, 2))
 
                 # Update topic mastery
@@ -149,7 +163,7 @@ class LearningStateManager:
 
                 current.recommended_next_action = "Advance to Next Topic" if current.overall_mastery >= 0.70 else "Continue guided practice"
 
-            elif event.correctness is False:
+            elif is_evaluated and event.correctness is False:
                 current.overall_mastery = max(0.1, round(current.overall_mastery - 0.05, 2))
 
                 # Update topic mastery
