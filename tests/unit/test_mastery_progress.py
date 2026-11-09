@@ -30,6 +30,7 @@ def make_event(
     topic_id: str = "Topic Test",
     correctness: bool | None = None,
     misconception: str | None = None,
+    action: PedagogicalAction | None = None,
 ) -> LearningEvent:
     return LearningEvent(
         id=event_id,
@@ -39,7 +40,7 @@ def make_event(
         topic_id=topic_id,
         prompt="student input",
         response="tutor response",
-        action=PedagogicalAction.EVALUATE if correctness is not None else PedagogicalAction.EXPLAIN,
+        action=action or (PedagogicalAction.EVALUATE if correctness is not None else PedagogicalAction.EXPLAIN),
         correctness=correctness,
         misconception=misconception,
     )
@@ -142,6 +143,41 @@ def test_repeated_event_id_deduplication(tmp_path: Path):
     after_replays = state.get_mastery("student_test", "course_test").overall_mastery
     assert after_replays == after_first
 
+
+
+def test_explain_event_cannot_change_mastery_even_with_correctness_flag(tmp_path: Path):
+    state = LearningStateManager(tmp_path / "mastery.sqlite")
+    before = state.get_mastery("student_test", "course_test")
+
+    state.record_event(make_event(
+        event_id="explain_with_true",
+        topic_id="Calculus",
+        correctness=True,
+        action=PedagogicalAction.EXPLAIN,
+    ))
+
+    after = state.get_mastery("student_test", "course_test")
+    assert after.overall_mastery == before.overall_mastery
+    assert after.topic_mastery == before.topic_mastery
+    assert after.weak_topics == before.weak_topics
+
+
+def test_explain_event_cannot_apply_misconception_without_remediation_action(tmp_path: Path):
+    state = LearningStateManager(tmp_path / "mastery.sqlite")
+    before = state.get_mastery("student_test", "course_test")
+
+    state.record_event(make_event(
+        event_id="explain_with_misconception",
+        topic_id="Logic Gates",
+        misconception="unverified misconception",
+        action=PedagogicalAction.EXPLAIN,
+    ))
+
+    after = state.get_mastery("student_test", "course_test")
+    assert after.overall_mastery == before.overall_mastery
+    assert after.topic_mastery == before.topic_mastery
+    assert after.weak_topics == before.weak_topics
+    assert after.recent_misconceptions == before.recent_misconceptions
 
 def test_course_and_student_isolation(tmp_path: Path):
     state = LearningStateManager(tmp_path / "mastery.sqlite")
